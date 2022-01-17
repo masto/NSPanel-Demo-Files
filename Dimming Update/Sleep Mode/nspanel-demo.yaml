@@ -1,0 +1,240 @@
+# Set some variables for convenience
+substitutions:
+  node_name: nspanel-demo
+  device_name: Demo NSPanel
+  tft_prefix: !secret tft_prefix
+
+# Note: this may not be needed if the pull request has been merged.
+# Check https://github.com/esphome/esphome/pull/2956 for current status.
+external_components:
+  - source: github://pr#2956
+    components: [nextion]
+    refresh: 1h
+
+esphome:
+  name: $node_name
+  comment: $device_name
+
+esp32:
+  board: esp32dev
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+# Enable logging
+logger:
+
+# Enable wireless updates
+ota:
+
+# Enable Home Assistant API
+api:
+  services:
+    # Service to play a song
+    - service: play_rtttl
+      variables:
+        song_str: string
+      then:
+        - rtttl.play:
+            rtttl: !lambda 'return song_str;'
+    - service: upload_tft
+      then:
+        - lambda: 'id(disp1).upload_tft();'
+    - service: send_command
+      variables:
+        cmd: string
+      then:
+        - lambda: 'id(disp1).send_command_printf("%s", cmd.c_str());'
+
+# Sync the time
+time:
+  - platform: homeassistant
+    id: homeassistant_time
+    on_time:
+      - seconds: 0
+        minutes: '*'
+        then:
+          - lambda: |-
+              auto time_text = id(homeassistant_time).now().strftime("%I:%M%p");
+              id(disp1).set_component_text("time", time_text.c_str());
+
+# A reboot button is always useful
+button:
+  - platform: restart
+    name: Restart $device_name
+    device_class: restart
+  - platform: template
+    name: $device_name TFT Upload
+    device_class: update
+    on_press:
+      - lambda: 'id(disp1).upload_tft();'
+
+# Define some inputs
+binary_sensor:
+  - platform: gpio
+    name: $device_name Top Button
+    pin:
+      number: 14
+      inverted: true
+    on_release:
+      then:
+        - lambda: 'id(disp1).sleep(0);'
+        - delay: 1s
+        - lambda: 'id(disp1).send_command_printf("sleep_timer.en=1");'
+
+  - platform: gpio
+    name: $device_name Bottom Button
+    pin:
+      number: 27
+      inverted: true
+    on_release:
+      then:
+        - lambda: 'id(disp1).sleep(0);'
+        - delay: 1s
+        - lambda: 'id(disp1).send_command_printf("sleep_timer.en=1");'
+
+  - platform: nextion
+    name: $device_name On Button
+    page_id: 0
+    component_id: 2
+
+  - platform: nextion
+    name: $device_name Off Button
+    page_id: 0
+    component_id: 3
+
+  - platform: nextion
+    name: $device_name Bright Room Button
+    page_id: 0
+    component_id: 11
+
+  - platform: nextion
+    name: $device_name Bright Bar Button
+    page_id: 0
+    component_id: 4
+
+  - platform: nextion
+    name: $device_name TV On Button
+    page_id: 0
+    component_id: 8
+
+  - platform: nextion
+    name: $device_name TV Off Button
+    page_id: 0
+    component_id: 9
+
+sensor:
+  - platform: wifi_signal
+    name: $device_name WiFi Signal
+    update_interval: 60s
+
+  - platform: ntc
+    id: temperature
+    sensor: resistance_sensor
+    calibration:
+      b_constant: 3950
+      reference_temperature: 25°C
+      reference_resistance: 10kOhm
+    name: $device_name Temperature
+
+  - platform: resistance
+    id: resistance_sensor
+    sensor: ntc_source
+    configuration: DOWNSTREAM
+    resistor: 11.2kOhm
+
+  - platform: adc
+    id: ntc_source
+    pin: 38
+    update_interval: 10s
+    attenuation: 11db
+
+  # Grab current temperature from Home Assistant
+  - platform: homeassistant
+    id: current_temperature
+    entity_id: weather.ridge_drive
+    attribute: temperature
+    on_value:
+      # Push it to the display
+      then:
+        - lambda: 'id(disp1).set_component_text_printf("temp", "%.1f ""\xb0""F", x);'
+
+# Define some outputs
+switch:
+  # The two relays
+  - platform: gpio
+    name: $device_name Relay 1
+    id: relay_1
+    pin:
+      number: 22
+    restore_mode: ALWAYS_ON
+  - platform: gpio
+    name: $device_name Relay 2
+    id: relay_2
+    pin:
+      number: 19
+
+  # Pin 4 always needs to be on to power up the display
+  - platform: gpio
+    id: screen_power
+    entity_category: config
+    pin:
+      number: 4
+      inverted: true
+    restore_mode: ALWAYS_ON
+
+number:
+  platform: template
+  name: $device_name Brightness
+  id: brightness
+  entity_category: config
+  unit_of_measurement: '%'
+  min_value: 0
+  max_value: 100
+  step: 1
+  initial_value: 25
+  set_action:
+    then:
+      - lambda: 'id(disp1).set_backlight_brightness(x/100);'
+
+# Configure the internal bleeper
+output:
+  - platform: ledc
+    id: buzzer_out
+    pin:
+      number: 21
+
+# Enable ringtone music support
+rtttl:
+  id: buzzer
+  output: buzzer_out
+
+# Configure UART for communicating with the screen
+uart:
+  id: tf_uart
+  tx_pin: 16
+  rx_pin: 17
+  baud_rate: 115200
+
+# Configure the screen itself
+display:
+  - platform: nextion
+    id: disp1
+    uart_id: tf_uart
+    tft_url: $tft_prefix/dim-demo.tft
+    on_wake:
+      then:
+        - lambda: 'id(disp1).send_command_printf("sleep_timer.en=1");'
+    on_setup:
+      then:
+        - number.set:
+            id: brightness
+            value: 25
+        - lambda: |-
+            id(disp1).set_component_text_printf(
+              "temp", "%.1f ""\xb0""F", id(current_temperature).state
+            );
+        # A little fun...
+        - rtttl.play: "startup:d=16,o=5,b=180:c,e,g,c6,8p,c,16p,e,c"
+        - lambda: 'id(disp1).send_command_printf("sleep_timer.en=1");'
